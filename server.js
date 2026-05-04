@@ -1,13 +1,19 @@
 import express from 'express';
-import { chain } from 'stream-chain';
-import { parser } from 'stream-json';
-import { pick } from 'stream-json/filters/Pick.js';
-import { streamArray } from 'stream-json/streamers/StreamArray.js';
+import { Readable } from 'stream';
+
+import streamChainPkg from 'stream-chain';
+import streamJsonPkg from 'stream-json';
+import pickPkg from 'stream-json/filters/Pick.js';
+import streamArrayPkg from 'stream-json/streamers/StreamArray.js';
+
+const { chain } = streamChainPkg;
+const { parser } = streamJsonPkg;
+const { pick } = pickPkg;
+const { streamArray } = streamArrayPkg;
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
-// teszt endpoint
 app.get('/', (req, res) => {
   res.send('OK');
 });
@@ -16,54 +22,83 @@ app.post('/process', async (req, res) => {
   const { fileUrl, webhookUrl, batchSize = 100 } = req.body;
 
   if (!fileUrl || !webhookUrl) {
-    return res.status(400).json({ error: 'Missing params' });
+    return res.status(400).json({ error: 'Missing fileUrl or webhookUrl' });
   }
 
   res.json({ status: 'started' });
 
-  const response = await fetch(fileUrl);
+  try {
+    const response = await fetch(fileUrl);
 
-  const pipeline = chain([
-    response.body,
-    parser(),
-    pick({ filter: 'results' }),
-    streamArray()
-  ]);
+    if (!response.ok) {
+      throw new Error(`File download failed: ${response.status}`);
+    }
 
-  let batch = [];
-  let batchIndex = 0;
+    const nodeStream = Readable.fromWeb(response.body);
 
-  for await (const { value } of pipeline) {
-    batch.push(value);
+    const pipeline = chain([
+      nodeStream,
+      parser(),
+      pick({ filter: 'results' }),
+      streamArray()
+    ]);
 
-    if (batch.length >= batchSize) {
+    let batch = [];
+    let batchIndex = 0;
+    let total = 0;
+
+    for await (const { value } of pipeline) {
+      batch.push(value);
+      total++;
+
+      if (batch.length >= batchSize) {
+        await sendBatch(webhookUrl, batch, batchIndex);
+        batch = [];
+        batchIndex++;
+      }
+    }
+
+    if (batch.length > 0) {
       await sendBatch(webhookUrl, batch, batchIndex);
-      batch = [];
       batchIndex++;
     }
-  }
 
-  if (batch.length > 0) {
-    await sendBatch(webhookUrl, batch, batchIndex);
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'done', total, batches: batchIndex })
+    });
+
+  } catch (error) {
+    console.error(error);
+
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'error', message: error.message })
+    }).catch(() => {});
   }
 });
 
 async function sendBatch(url, orders, index) {
-  await fetch(url, {
+  const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       type: 'batch',
       batchIndex: index,
+      count: orders.length,
       orders
     })
   });
+
+  if (!response.ok) {
+    throw new Error(`Webhook failed: ${response.status}`);
+  }
 }
 
 const port = process.env.PORT || 3000;
 
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on ${port}`);
 });
