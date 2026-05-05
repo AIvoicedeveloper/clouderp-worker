@@ -19,7 +19,7 @@ app.get('/', (req, res) => {
 });
 
 app.post('/process', async (req, res) => {
-  const { fileUrl, webhookUrl, batchSize = 100 } = req.body;
+  const { fileUrl, webhookUrl, batchSize = 100, feedKey, run_id } = req.body;
 
   if (!fileUrl || !webhookUrl) {
     return res.status(400).json({ error: 'Missing fileUrl or webhookUrl' });
@@ -52,21 +52,21 @@ app.post('/process', async (req, res) => {
       total++;
 
       if (batch.length >= batchSize) {
-        await sendBatch(webhookUrl, batch, batchIndex);
+        await sendBatch(webhookUrl, batch, batchIndex, feedKey, run_id);
         batch = [];
         batchIndex++;
       }
     }
 
     if (batch.length > 0) {
-      await sendBatch(webhookUrl, batch, batchIndex);
+      await sendBatch(webhookUrl, batch, batchIndex, feedKey, run_id);
       batchIndex++;
     }
 
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'done', total, batches: batchIndex })
+      body: JSON.stringify({ type: 'done', total, batches: batchIndex, feedKey, run_id })
     });
 
   } catch (error) {
@@ -75,17 +75,19 @@ app.post('/process', async (req, res) => {
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'error', message: error.message })
+      body: JSON.stringify({ type: 'error', message: error.message, feedKey, run_id })
     }).catch(() => {});
   }
 });
 
-async function sendBatch(url, orders, index) {
+async function sendBatch(url, orders, index, feedKey, run_id) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       type: 'batch',
+      feedKey,
+      run_id,
       batchIndex: index,
       count: orders.length,
       orders
